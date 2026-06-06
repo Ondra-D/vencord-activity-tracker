@@ -1,21 +1,5 @@
-/* eslint-disable simple-header/header */
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+
+
 
 import { classNameFactory } from "@api/Styles";
 import { Button } from "@components/Button";
@@ -24,7 +8,7 @@ import { PluginNative } from "@utils/types";
 import { Forms, GuildStore, NavigationRouter, ScrollerThin, TabBar, Text, Tooltip, useEffect, useMemo, UserStore,useState } from "@webpack/common";
 
 import { isDebugEnabled } from "../settings";
-import { clearProfileSnapshots, loadPresenceLogs, presenceLogListeners, presenceLogs } from "../store";
+import { clearProfileSnapshots, loadPresenceLogs, presenceLogListeners, presenceLogs, isDesktop, deleteUserLogs } from "../store";
 import { PresenceLogEntry } from "../types";
 import { formatTimestamp, getDurationLabel, getStatusClass, getStatusLabel, logger } from "../utils";
 import { renderPresenceActivitySummary } from "./ActivityBadges";
@@ -33,7 +17,7 @@ import { renderProfileChangeBadges } from "./ProfileCard";
 import { openSnapshotsModal } from "./SnapshotsModal";
 import { openUserStalkerSettings } from "./UserSettings";
 
-const Native = VencordNative.pluginHelpers.Stalker as PluginNative<typeof import("../native")>;
+const Native = isDesktop ? VencordNative.pluginHelpers.Stalker as PluginNative<typeof import("../native")> : null;
 
 const cl = classNameFactory("stalker-modal-");
 
@@ -113,6 +97,17 @@ function ConfirmClearSnapshotsModal({ modalProps, onConfirm }: { modalProps: Mod
 export function PresenceHistoryPanel({ modalProps, initialUserId }: { modalProps: ModalProps; initialUserId?: string; }) {
     const [logs, setLogs] = useState<PresenceLogEntry[]>(presenceLogs);
     const filterUserId = initialUserId ?? null;
+
+    const userLogsMap = useMemo(() => {
+        const map = new Map<string, PresenceLogEntry[]>();
+        for (const log of logs) {
+            if (!map.has(log.userId)) {
+                map.set(log.userId, []);
+            }
+            map.get(log.userId)!.push(log);
+        }
+        return map;
+    }, [logs]);
     const [selectedSection, setSelectedSection] = useState<number>(0);
     const [dayOffset, setDayOffset] = useState(0);
 
@@ -153,6 +148,7 @@ export function PresenceHistoryPanel({ modalProps, initialUserId }: { modalProps
         : `${basePresenceItems.length + profileItems.length + messageItems.length + richActivityItems.length} tracked changes`;
 
     const openLogs = async () => {
+        if (!Native) return;
         try {
             if (filterUserId) {
                 await Native.openLogFile(filterUserId);
@@ -167,7 +163,7 @@ export function PresenceHistoryPanel({ modalProps, initialUserId }: { modalProps
     const deleteAllLogs = async () => {
         if (!filterUserId) return;
         try {
-            await Native.deleteLogs(filterUserId);
+            await deleteUserLogs(filterUserId);
             await loadPresenceLogs();
             setLogs([]);
         } catch (e) {
@@ -243,7 +239,7 @@ export function PresenceHistoryPanel({ modalProps, initialUserId }: { modalProps
                         <Forms.FormText>{subtitle}</Forms.FormText>
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
-                        <Button onClick={openLogs}>Open Logs</Button>
+                        {isDesktop && <Button onClick={openLogs}>Open Logs</Button>}
                         {filterUserId && <Button onClick={confirmDeleteLogs} variant="dangerPrimary">Delete All Logs</Button>}
                         {!filterUserId && <Button onClick={confirmClearSnapshots} variant="dangerPrimary">Clear All Snapshots</Button>}
                         {showDebugTools && (
@@ -296,7 +292,7 @@ export function PresenceHistoryPanel({ modalProps, initialUserId }: { modalProps
                                             <span>{formatTimestamp(entry.timestamp)}</span>
                                             {entry.offlineDuration && <span>Offline {getDurationLabel(entry.offlineDuration)}</span>}
                                             {entry.onlineDuration && <span>Online {getDurationLabel(entry.onlineDuration)}</span>}
-                                            {renderPresenceActivitySummary(entry)}
+                                            {renderPresenceActivitySummary(entry, userLogsMap.get(entry.userId) || [])}
                                             {renderDeviceBadges(entry)}
                                         </div>
                                     </div>
@@ -423,7 +419,7 @@ export function PresenceHistoryPanel({ modalProps, initialUserId }: { modalProps
                                         </div>
                                         <div className="stalker-log-entry__meta">
                                             <span>{formatTimestamp(entry.timestamp)}</span>
-                                            {renderPresenceActivitySummary(entry)}
+                                            {renderPresenceActivitySummary(entry, userLogsMap.get(entry.userId) || [])}
                                             {renderDeviceBadges(entry)}
                                         </div>
                                     </div>

@@ -1,25 +1,40 @@
-/* eslint-disable simple-header/header */
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+
+
 
 import { ApplicationStore, Tooltip } from "@webpack/common";
 
 import { PresenceLogEntry } from "../types";
+import { formatTimestamp, getDurationLabel } from "../utils";
+
+export function getActivityStopTimestamp(
+    entry: PresenceLogEntry,
+    act: any,
+    allUserLogs: PresenceLogEntry[]
+): number | null {
+    const idx = allUserLogs.findIndex(e => e.timestamp === entry.timestamp);
+    if (idx === -1) return null;
+
+    for (let i = idx - 1; i >= 0; i--) {
+        const laterEntry = allUserLogs[i];
+        const hasActivity = laterEntry.activities?.some(a => {
+            const isSameBase = a.name === act.name ||
+                ((a.application_id ?? a.applicationId) && (a.application_id ?? a.applicationId) === (act.application_id ?? act.applicationId));
+            if (!isSameBase) return false;
+
+            if (a.details !== act.details) return false;
+            if (a.state !== act.state) return false;
+            if (a.timestamps?.start !== act.timestamps?.start) return false;
+            if (a.timestamps?.end !== act.timestamps?.end) return false;
+
+            return true;
+        });
+        const wentOffline = laterEntry.currentStatus === "offline";
+        if (!hasActivity || wentOffline) {
+            return laterEntry.timestamp;
+        }
+    }
+    return null;
+}
 
 function getAssetUrl(appId: string | undefined, assetId: string | undefined) {
     if (!assetId) return null;
@@ -59,7 +74,7 @@ function getPartyState(activity: any) {
     return null;
 }
 
-function renderActivityTooltip(activity: any) {
+function renderActivityTooltip(activity: any, stopTime?: number | null, startTime?: number) {
     const appId = activity.application_id ?? activity.applicationId;
     let largeImage = getAssetUrl(appId, activity.assets?.large_image ?? activity.assets?.largeImage);
     const smallImage = getAssetUrl(appId, activity.assets?.small_image ?? activity.assets?.smallImage);
@@ -98,12 +113,19 @@ function renderActivityTooltip(activity: any) {
                 {details && <span className="stalker-activity-details">{details}</span>}
                 {state && <span className="stalker-activity-state">{state}</span>}
                 {party?.long && <span className="stalker-activity-party">{party.long}</span>}
+                {startTime && (
+                    <div className="stalker-activity-time" style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2, borderTop: "1px solid var(--background-modifier-accent)", paddingTop: 6 }}>
+                        <span><strong>Started:</strong> {formatTimestamp(startTime)}</span>
+                        <span><strong>Stopped:</strong> {stopTime ? formatTimestamp(stopTime) : "Ongoing"}</span>
+                        <span><strong>Duration:</strong> {stopTime ? getDurationLabel(stopTime - startTime) : "Ongoing"}</span>
+                    </div>
+                )}
             </div>
         </div>
     );
 }
 
-function renderActivityBadge(activity: any, key: string) {
+function renderActivityBadge(activity: any, key: string, entry: PresenceLogEntry, allUserLogs?: PresenceLogEntry[]) {
     const party = getPartyState(activity);
     const isSpotify = activity.type === 2 && ((activity.name?.toLowerCase?.() === "spotify") || ((activity.application_id ?? activity.applicationId) === "spotify"));
     const isYouTubeMusic = activity.name === "YouTube Music";
@@ -112,6 +134,9 @@ function renderActivityBadge(activity: any, key: string) {
     if (isSpotify) labelBase = "spotify";
     else if (isYouTubeMusic) labelBase = "yt music";
 
+    const stopTime = allUserLogs ? getActivityStopTimestamp(entry, activity, allUserLogs) : null;
+    const duration = stopTime ? stopTime - entry.timestamp : null;
+    const durationText = duration ? getDurationLabel(duration) : (entry.currentStatus === "offline" ? null : "Ongoing");
 
     const label = party?.short ? `${labelBase} (${party.short})` : labelBase;
     const classNames = [
@@ -126,19 +151,20 @@ function renderActivityBadge(activity: any, key: string) {
         : null;
 
     return (
-        <Tooltip key={key} text={renderActivityTooltip(activity)} spacing={12} tooltipClassName="stalker-activity-tooltip">
+        <Tooltip key={key} text={renderActivityTooltip(activity, stopTime, entry.timestamp)} spacing={12} tooltipClassName="stalker-activity-tooltip">
             {(tooltipProps: any) => (
                 <span {...tooltipProps} className={classNames} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                     {emojiUrl && <img src={emojiUrl} alt="" style={{ width: 14, height: 14 }} />}
                     {!emojiUrl && activity.emoji?.name && <span>{activity.emoji.name}</span>}
-                    {label}
+                    <span>{label}</span>
+                    {durationText && <span className="stalker-badge-duration">{durationText}</span>}
                 </span>
             )}
         </Tooltip>
     );
 }
 
-export function renderPresenceActivitySummary(entry: PresenceLogEntry) {
+export function renderPresenceActivitySummary(entry: PresenceLogEntry, allUserLogs?: PresenceLogEntry[]) {
     const activities = (entry as any).activities as any[] | undefined;
     if (!activities || activities.length === 0) {
         if (entry.activitySummary) return <span>Activity: {entry.activitySummary}</span>;
@@ -147,8 +173,6 @@ export function renderPresenceActivitySummary(entry: PresenceLogEntry) {
 
     const filteredActivities = activities.filter(act => act.name !== "Hang Status");
     if (filteredActivities.length === 0) return null;
-
-    // Deduplicate activities by application_id or name
     const seen = new Set<string>();
     const uniqueActivities = filteredActivities.filter(act => {
         const key = (act.application_id ?? act.applicationId) || act.name || Math.random().toString();
@@ -159,7 +183,7 @@ export function renderPresenceActivitySummary(entry: PresenceLogEntry) {
 
     return (
         <div className="stalker-activity-badges">
-            {uniqueActivities.map((act, idx) => renderActivityBadge(act, `${entry.userId}-${entry.timestamp}-act-${idx}`))}
+            {uniqueActivities.map((act, idx) => renderActivityBadge(act, `${entry.userId}-${entry.timestamp}-act-${idx}`, entry, allUserLogs))}
         </div>
     );
 }

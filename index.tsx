@@ -1,26 +1,6 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
 
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+
+
 
 import "./styles.css";
 
@@ -57,6 +37,7 @@ import {
     persistLastOfflineTimestamp,
     persistProfileSnapshot,
     presenceLogs,
+    pendingActivityLogs,
     recentCurrentUserMessages,
     typingCooldowns
 } from "./store";
@@ -119,8 +100,6 @@ async function stalkUser(id: string) {
                 const avatar = u.avatar ?? null;
                 const banner = userProfile.banner ?? u.banner ?? null;
                 const avatarDecorationData = (userProfile as any).avatarDecorationData ?? (u as any).avatarDecorationData ?? (u as any).avatar_decoration_data ?? null;
-
-                // capture custom status
                 const currentActivities = PresenceStore.getActivities(id) || [];
                 const customStatusActivity = currentActivities.find(a => a?.type === 4);
                 const customStatus = customStatusActivity?.state ?? null;
@@ -207,15 +186,12 @@ export default definePlugin({
         const isOnline = (status: string | null) => status && !["offline", "invisible"].includes(status?.toLowerCase() ?? "");
         const currentStatus = PresenceStore.getStatus(userId);
         const online = isOnline(currentStatus);
-
-        // calculate online/offline time
         const userLogs = presenceLogs.filter(log => log.userId === userId);
         const now = Date.now();
         let text: string;
         let lastSeenText = "Unknown";
 
         if (online) {
-            // Find when they came online (last offline->online transition)
             const lastOnlineLog = userLogs.find(log =>
                 isOnline(log.currentStatus) && !isOnline(log.previousStatus ?? null)
             );
@@ -227,7 +203,6 @@ export default definePlugin({
                 text = "Online";
             }
         } else {
-            // Find when they went offline (last online->offline transition)
             const lastOfflineLog = userLogs.find(log =>
                 !isOnline(log.currentStatus) && isOnline(log.previousStatus ?? null)
             );
@@ -301,8 +276,6 @@ export default definePlugin({
                 const currentAvatar = cur.avatar ?? null;
                 const currentBanner = profileData.banner ?? user.banner ?? cur.banner ?? null;
                 const avatarDecorationData = profileData.avatar_decoration_data ?? (cur as any).avatarDecorationData ?? (cur as any).avatar_decoration_data ?? null;
-
-                // custom status only when online
                 const status = PresenceStore.getStatus(id);
                 const isOnline = status && status !== "offline" && status !== "invisible";
                 const currentActivities = PresenceStore.getActivities(id) || [];
@@ -325,16 +298,12 @@ export default definePlugin({
                     emoji: profileData.emoji ?? null,
                     customStatus
                 };
-
-                // merge with previous
                 const mergedSnapshot = mergeProfileSnapshots(prev, newSnapshot);
 
                 if (!prev) {
                     await persistProfileSnapshot(id, mergedSnapshot);
                     return;
                 }
-
-                // Detect real changes
                 const changes = detectProfileChanges(prev, mergedSnapshot);
 
                 if (changes.length > 0) {
@@ -366,7 +335,6 @@ export default definePlugin({
                         } as any);
 
                         if (userConfig.notifyProfileChanges) {
-                            // filter by notification prefs
                             const filteredChanges = changes.filter(change => {
                                 if (change === "username" && userConfig.notifyUsername !== false) return true;
                                 if (change === "avatar" && userConfig.notifyAvatar !== false) return true;
@@ -386,19 +354,18 @@ export default definePlugin({
                                         body: changeLabels.join(", "),
                                         icon: cur.avatar ? `https://cdn.discordapp.com/avatars/${id}/${cur.avatar}.png?size=64` : undefined
                                     });
-                                } catch (e) { /* ignore */ }
+                                } catch (e) {  }
                             }
                         }
                     }
                 } else {
-                    // still update snapshot
                     await persistProfileSnapshot(id, mergedSnapshot);
                 }
             } catch (e) {
                 logger.error("Error in USER_PROFILE_FETCH_SUCCESS handler", e);
             }
         },
-        USER_UPDATE(payload: any) {
+        async USER_UPDATE(payload: any) {
             try {
                 const user = payload?.user;
                 if (!user || !user.id) return;
@@ -412,32 +379,22 @@ export default definePlugin({
 
                 const cur = UserStore.getUser(id);
                 if (!cur) return;
-
-                // get activities for custom status
                 const status = PresenceStore.getStatus(id);
                 const isOnline = status && status !== "offline" && status !== "invisible";
                 const currentActivities = PresenceStore.getActivities(id) || [];
                 const capturedSnapshot = captureProfileSnapshot(cur, UserProfileStore, currentActivities);
-
-                // fetch profile if missing
                 if (capturedSnapshot.bio === undefined) {
                     fetchUserProfile(id);
                 }
-
-                // preserve custom status when offline
                 if (!isOnline && prev.customStatus !== undefined) {
                     capturedSnapshot.customStatus = prev.customStatus;
                 }
-
-                // merge with previous
                 const mergedSnapshot = mergeProfileSnapshots(prev, capturedSnapshot);
-
-                // detect changes
                 const changes = detectProfileChanges(prev, mergedSnapshot);
 
                 if (changes.length > 0) {
                     logger.info(`USER_UPDATE changes for ${cur.username}:`, changes);
-                    lastKnownUsers.set(id, mergedSnapshot);
+                    await persistProfileSnapshot(id, mergedSnapshot);
 
                     const userConfig = getUserConfig(id);
                     if (userConfig.logProfileChanges) {
@@ -464,7 +421,6 @@ export default definePlugin({
                         } as any);
 
                         if (userConfig.notifyProfileChanges) {
-                            // filter by notification prefs
                             const filteredChanges = changes.filter(change => {
                                 if (change === "username" && userConfig.notifyUsername !== false) return true;
                                 if (change === "avatar" && userConfig.notifyAvatar !== false) return true;
@@ -484,7 +440,7 @@ export default definePlugin({
                                         body: changeLabels.join(", "),
                                         icon: cur.avatar ? `https://cdn.discordapp.com/avatars/${id}/${cur.avatar}.png?size=64` : undefined
                                     });
-                                } catch (e) { /* ignore */ }
+                                } catch (e) {  }
                             }
                         }
                     }
@@ -542,7 +498,7 @@ export default definePlugin({
                         });
 
                         typingCooldowns.set(userId, now + 20_000);
-                    } catch (e) { /* ignore */ }
+                    } catch (e) {  }
                 }
             } catch (e) {
                 logger.error("Typing listener error", e);
@@ -637,7 +593,7 @@ export default definePlugin({
                             body: content || "(message hidden)",
                             icon: avatarUrl ?? (user?.avatar ? `https://cdn.discordapp.com/avatars/${authorId}/${user.avatar}.png?size=64` : undefined)
                         });
-                    } catch (e) { /* ignore */ }
+                    } catch (e) {  }
                 }
             } catch (e) {
                 logger.error("Message listener error", e);
@@ -716,8 +672,6 @@ export default definePlugin({
 
                     const currentActivities = PresenceStore.getActivities(userId) || [];
                     const previousActivities = lastKnownActivities.get(userId) || [];
-
-                    // Extract custom status (type 4) separately
                     const currentCustomStatus = currentActivities.find(a => a?.type === 4);
                     const previousCustomStatus = previousActivities.find(a => a?.type === 4);
                     const customStatusChanged = currentCustomStatus?.state !== previousCustomStatus?.state;
@@ -732,8 +686,6 @@ export default definePlugin({
                     const activitiesChanged = JSON.stringify(filteredPreviousActivities) !== JSON.stringify(filteredCurrentActivities);
 
                     if (UserStore.getCurrentUser().id === userId && currentStatus === "online") continue;
-
-                    // Update profile snapshot if custom status changed (only when online)
                     if (customStatusChanged) {
                         const user = UserStore.getUser(userId);
                         const isOnline = (status: string | null) => status && !["offline", "invisible"].includes(status?.toLowerCase() ?? "");
@@ -743,10 +695,7 @@ export default definePlugin({
                             const prev = lastKnownUsers.get(userId);
 
                             if (prev) {
-                                // Merge with previous to preserve data that wasn't fetched
                                 const mergedSnapshot = mergeProfileSnapshots(prev, currentSnapshot);
-
-                                // Detect real changes
                                 const changes = detectProfileChanges(prev, mergedSnapshot);
 
                                 if (changes.length > 0) {
@@ -785,7 +734,7 @@ export default definePlugin({
                                                     body: changeLabels.join(", "),
                                                     icon: user.avatar ? `https://cdn.discordapp.com/avatars/${userId}/${user.avatar}.png?size=64` : undefined
                                                 });
-                                            } catch (e) { /* ignore */ }
+                                            } catch (e) {  }
                                         }
                                     }
                                 }
@@ -861,47 +810,47 @@ export default definePlugin({
                                     type: "presence" as const
                                 };
 
-                                const timeout = setTimeout(() => {
-                                    pendingOnlineLogs.delete(userId);
-                                    addPresenceLog(entry);
-                                }, 5000);
-
-                                pendingOnlineLogs.set(userId, { timeout, entry });
-                            } else if (activitiesChanged && pendingOnlineLogs.has(userId)) {
-                                const pending = pendingOnlineLogs.get(userId)!;
-                                clearTimeout(pending.timeout);
-                                pending.entry.activitySummary = activitySummary;
-                                pending.entry.activities = activitySnapshot;
-
-                                pending.timeout = setTimeout(() => {
-                                    pendingOnlineLogs.delete(userId);
-                                    addPresenceLog(pending.entry);
-                                }, 5000);
+                                addPresenceLog(entry);
+                                pendingOnlineLogs.delete(userId);
                             } else {
                                 if (!pendingOnlineLogs.has(userId)) {
                                     const now = Date.now();
-                                    const lastActivityLog = activityLogCooldowns.get(userId);
-                                    if (!activitiesChanged || !lastActivityLog || (now - lastActivityLog) >= 60_000) {
-                                        addPresenceLog({
-                                            userId,
-                                            username: user.username,
-                                            discriminator: user.discriminator,
-                                            timestamp: now,
-                                            previousStatus: statusChanged ? previousStatus : undefined,
-                                            currentStatus,
-                                            guildId: undefined,
-                                            clientStatus: clientStatusMap,
-                                            activitySummary,
-                                            clientStatusSummary,
-                                            guildName: null,
-                                            offlineDuration,
-                                            onlineDuration,
-                                            activities: activitySnapshot,
-                                            type: "presence" as const
-                                        });
-                                        if (activitiesChanged) {
-                                            activityLogCooldowns.set(userId, now);
+                                    const entry = {
+                                        userId,
+                                        username: user.username,
+                                        discriminator: user.discriminator,
+                                        timestamp: now,
+                                        previousStatus: statusChanged ? previousStatus : undefined,
+                                        currentStatus,
+                                        guildId: undefined,
+                                        clientStatus: clientStatusMap,
+                                        activitySummary,
+                                        clientStatusSummary,
+                                        guildName: null,
+                                        offlineDuration,
+                                        onlineDuration,
+                                        activities: activitySnapshot,
+                                        type: "presence" as const
+                                    };
+
+                                    if (activitiesChanged) {
+                                        const pending = pendingActivityLogs.get(userId);
+                                        if (pending) clearTimeout(pending.timeout);
+
+                                        const timeout = setTimeout(() => {
+                                            addPresenceLog(pendingActivityLogs.get(userId)?.entry ?? entry);
+                                            pendingActivityLogs.delete(userId);
+                                            activityLogCooldowns.set(userId, Date.now());
+                                        }, 10_000);
+
+                                        pendingActivityLogs.set(userId, { timeout, entry });
+                                    } else if (statusChanged) {
+                                        const pending = pendingActivityLogs.get(userId);
+                                        if (pending) {
+                                            clearTimeout(pending.timeout);
+                                            pendingActivityLogs.delete(userId);
                                         }
+                                        addPresenceLog(entry);
                                     }
                                 }
                             }
@@ -924,6 +873,11 @@ export default definePlugin({
             this.presenceListener = null;
         }
         removeContextMenuPatch("user-context", contextMenuPatch);
+
+        pendingOnlineLogs.forEach(p => clearTimeout(p.timeout));
+        pendingOnlineLogs.clear();
+        pendingActivityLogs.forEach(p => clearTimeout(p.timeout));
+        pendingActivityLogs.clear();
     }
 });
 

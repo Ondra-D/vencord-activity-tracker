@@ -1,21 +1,5 @@
-/* eslint-disable simple-header/header */
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+
+
 
 import * as DataStore from "@api/DataStore";
 import { showNotification } from "@api/Notifications";
@@ -25,15 +9,59 @@ import { getRetentionCutoffMs, getWhitelistedIds } from "./settings";
 import { PresenceLogEntry, ProfileSnapshot, UserStalkerConfig } from "./types";
 import { formatTimestamp, getDurationLabel, logger } from "./utils";
 
-const Native = VencordNative.pluginHelpers.Stalker as PluginNative<typeof import("./native")>;
+export const isDesktop = typeof VencordNative !== "undefined" && !!VencordNative.pluginHelpers?.Stalker;
+export const Native = isDesktop ? VencordNative.pluginHelpers.Stalker as PluginNative<typeof import("./native")> : null;
 
-// Storage keys
+export async function readUserLogs(userId: string, cutoffMs?: number): Promise<PresenceLogEntry[]> {
+    if (Native) {
+        return await Native.readLogs(userId, cutoffMs);
+    } else {
+        try {
+            const logs = await DataStore.get(`stalker-logs-${userId}`) as PresenceLogEntry[] | undefined;
+            if (!Array.isArray(logs)) return [];
+            if (cutoffMs) {
+                return logs.filter(log => log.timestamp >= cutoffMs);
+            }
+            return logs;
+        } catch (e) {
+            logger.error(`Failed to read web logs for user ${userId}`, e);
+            return [];
+        }
+    }
+}
+
+export async function appendUserLog(userId: string, entry: PresenceLogEntry, cutoffMs: number) {
+    if (Native) {
+        await Native.appendLog(userId, entry, cutoffMs);
+    } else {
+        try {
+            let existing = await readUserLogs(userId);
+            if (cutoffMs) {
+                existing = existing.filter(log => log.timestamp >= cutoffMs);
+            }
+            existing.unshift(entry);
+            await DataStore.set(`stalker-logs-${userId}`, existing);
+        } catch (e) {
+            logger.error(`Failed to append web log for user ${userId}`, e);
+        }
+    }
+}
+
+export async function deleteUserLogs(userId: string) {
+    if (Native) {
+        await Native.deleteLogs(userId);
+    } else {
+        try {
+            await DataStore.del(`stalker-logs-${userId}`);
+        } catch (e) {
+            logger.error(`Failed to delete web logs for user ${userId}`, e);
+        }
+    }
+}
 const lastOfflineStoreKey = () => "stalker-last-offline";
 const profileSnapshotsStoreKey = () => "stalker-profile-snapshots";
 const userConfigsStoreKey = () => "stalker-user-configs";
 const notificationOverridesKey = () => "stalker-notify-ids";
-
-// In-memory state
 export const lastOnlineTimestamps = new Map<string, number>();
 export const lastOfflineTimestamps = new Map<string, number>();
 export const offlineDurations = new Map<string, number>();
@@ -45,10 +73,9 @@ export const lastKnownStatuses = new Map<string, string | null>();
 export const lastKnownActivities = new Map<string, any[]>();
 export const typingCooldowns = new Map<string, number>();
 export const pendingOnlineLogs = new Map<string, { timeout: ReturnType<typeof setTimeout>; entry: any; }>();
+export const pendingActivityLogs = new Map<string, { timeout: ReturnType<typeof setTimeout>; entry: any; }>();
 export const activityLogCooldowns = new Map<string, number>();
 export const notificationOverrideIds = new Set<string>();
-
-// defaults for new users
 const DEFAULT_USER_CONFIG: Omit<UserStalkerConfig, "userId"> = {
     logPresenceChanges: true,
     logProfileChanges: true,
@@ -60,12 +87,10 @@ const DEFAULT_USER_CONFIG: Omit<UserStalkerConfig, "userId"> = {
     typingConversationWindow: 10,
     serverFilterMode: "all",
     serverList: [],
-    // Granular presence notifications (default all enabled)
     notifyOnline: true,
     notifyOffline: true,
     notifyIdle: true,
     notifyDnd: true,
-    // Granular profile notifications (default all enabled)
     notifyUsername: true,
     notifyAvatar: true,
     notifyBanner: true,
@@ -73,8 +98,6 @@ const DEFAULT_USER_CONFIG: Omit<UserStalkerConfig, "userId"> = {
     notifyPronouns: true,
     notifyGlobalName: true
 };
-
-// presence logs
 export const presenceLogListeners = new Set<(logs: PresenceLogEntry[]) => void>();
 export let presenceLogs: PresenceLogEntry[] = [];
 
@@ -102,15 +125,10 @@ export function addPresenceLog(entry: PresenceLogEntry & { activitySummary?: str
     if (entry.clientStatusSummary) parts.push(`Clients: ${entry.clientStatusSummary}`);
 
     logger.info(parts.join(" | "));
-
-    // Save to disk via native helper
-    Native.appendLog(entry.userId, entry, cutoffMs).catch(e => logger.error("Failed to save log entry", e));
-
-    // Check if we should send a notification for presence changes
+    appendUserLog(entry.userId, entry, cutoffMs).catch(e => logger.error("Failed to save log entry", e));
     if (entry.type === "presence" && entry.previousStatus !== entry.currentStatus) {
         const userConfig = getUserConfig(entry.userId);
         if (userConfig.notifyPresenceChanges) {
-            // Check granular settings for specific status types
             let shouldNotify = false;
             const currentStatus = entry.currentStatus?.toLowerCase();
 
@@ -138,14 +156,11 @@ export function addPresenceLog(entry: PresenceLogEntry & { activitySummary?: str
                         body,
                         icon: undefined
                     });
-                } catch (e) { /* ignore notification errors */ }
+                } catch (e) {  }
             }
         }
     }
 }
-
-
-// user config
 export async function loadUserConfigs() {
     try {
         const saved = await DataStore.get(userConfigsStoreKey()) as Record<string, UserStalkerConfig> | undefined;
@@ -190,8 +205,6 @@ export function getUserConfig(userId: string): UserStalkerConfig {
     }
     return merged;
 }
-
-// offline timestamps
 export async function loadLastOfflineTimestamps() {
     try {
         const saved = await DataStore.get(lastOfflineStoreKey()) as Record<string, number> | undefined;
@@ -212,8 +225,6 @@ export function persistLastOfflineTimestamp(userId: string, timestamp: number) {
         logger.error("Failed to persist last offline timestamps", e);
     });
 }
-
-// profile snapshots
 export async function loadProfileSnapshots() {
     try {
         const saved = await DataStore.get(profileSnapshotsStoreKey()) as Record<string, ProfileSnapshot> | undefined;
@@ -252,8 +263,6 @@ export function captureProfileSnapshot(user: any, profileStore?: any, activities
     const banner = profile ? (profile.banner ?? user.banner ?? null) : undefined;
     const banner_color = profile ? (profile.bannerColor ?? (user as any).banner_color ?? (user as any).bannerColor ?? null) : undefined;
     const avatarDecorationData = (profile as any)?.avatarDecorationData ?? (user as any).avatarDecorationData ?? (user as any).avatar_decoration_data ?? null;
-
-    // Extract custom status from activities (type 4 is CUSTOM_STATUS)
     const customStatusActivity = activities?.find(act => act.type === 4);
     const customStatus = customStatusActivity?.state ?? null;
 
@@ -280,14 +289,10 @@ export function captureProfileSnapshot(user: any, profileStore?: any, activities
         connected_accounts: connectedAccounts
     };
 }
-
-// merge new snapshot with previous, preserving data that wasn't fetched
 export function mergeProfileSnapshots(prev: ProfileSnapshot | undefined, current: ProfileSnapshot): ProfileSnapshot {
     if (!prev) return current;
 
     const merged: ProfileSnapshot = { ...prev };
-
-    // basic fields
     const basicFields: (keyof ProfileSnapshot)[] = [
         "username", "avatar", "discriminator", "global_name",
         "avatarDecoration", "avatarDecorationData"
@@ -298,8 +303,6 @@ export function mergeProfileSnapshots(prev: ProfileSnapshot | undefined, current
             merged[field] = current[field] as any;
         }
     }
-
-    // profile fields (only update if provided)
     const profileFields: (keyof ProfileSnapshot)[] = [
         "bio", "banner", "banner_color", "pronouns",
         "theme_colors", "emoji", "connected_accounts"
@@ -310,18 +313,12 @@ export function mergeProfileSnapshots(prev: ProfileSnapshot | undefined, current
             merged[field] = current[field] as any;
         }
     }
-
-    // custom status (only when online)
     if (current.customStatus !== undefined) merged.customStatus = current.customStatus;
 
     return merged;
 }
-
-// detect real changes between snapshots
 export function detectProfileChanges(prev: ProfileSnapshot, current: ProfileSnapshot): string[] {
     const changes: string[] = [];
-
-    // simple comparison
     const simpleKeys: (keyof ProfileSnapshot)[] = [
         "username", "avatar", "discriminator", "global_name",
         "avatarDecoration", "bio", "banner", "banner_color",
@@ -329,14 +326,10 @@ export function detectProfileChanges(prev: ProfileSnapshot, current: ProfileSnap
     ];
 
     for (const key of simpleKeys) {
-        // For profile fields, we only compare if BOTH values exist to avoid false positives
-        // Basic fields (username etc) are always present so this check is safe for them too
         if (prev[key] !== undefined && current[key] !== undefined && prev[key] !== current[key]) {
             changes.push(key === "global_name" ? "display_name" : key);
         }
     }
-
-    // deep comparison
     const complexKeys: (keyof ProfileSnapshot)[] = [
         "theme_colors", "emoji", "connected_accounts"
     ];
@@ -351,25 +344,20 @@ export function detectProfileChanges(prev: ProfileSnapshot, current: ProfileSnap
 
     return changes;
 }
-
-// load logs from disk
 export async function loadPresenceLogs() {
     try {
-        // Load logs for all users
         const userIds = getWhitelistedIds();
         const allLogs: PresenceLogEntry[] = [];
         const cutoffMs = getRetentionCutoffMs();
 
         for (const userId of userIds) {
             try {
-                const userLogs = await Native.readLogs(userId, cutoffMs);
+                const userLogs = await readUserLogs(userId, cutoffMs);
                 allLogs.push(...userLogs);
             } catch (e) {
                 logger.error(`Failed to load logs for user ${userId}`, e);
             }
         }
-
-        // Sort by timestamp descending
         allLogs.sort((a, b) => b.timestamp - a.timestamp);
 
         presenceLogs = allLogs;
