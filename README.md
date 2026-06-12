@@ -1,4 +1,4 @@
-# Vencord Stalker
+# Vencord Activity Tracker
 
 A Vencord custom plugin that logs presence/activity changes and user profile updates for selected users.
 
